@@ -1,0 +1,482 @@
+---
+title: "Analyzing map/EspF Data - Looking at map hits"
+output: html_notebook
+---
+```{r include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(include = TRUE)
+```
+
+```{r libs, echo=FALSE, include=FALSE}
+library("tidyverse")
+library("ggvenn")
+library(ggstatsplot)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggrepel)
+library(ggprism)
+library(rcartocolor)
+theme_set(theme_bw(base_size = 14))
+```
+
+```{r helper}
+cont_pal <- carto_pal(7,name = "BluYl")
+diverg_pal <- carto_pal(7,"Geyser")
+```
+
+
+
+```{r echo=TRUE, include=TRUE}
+#read in ratios
+evid <- read.table("proteinGroups.txt", header = T, sep = "\t")
+#Remove contaminants and low-confidence peptides (less than 1 peptide in at least 2 experiments)
+evid_all <- evid %>% 
+  dplyr::select(Protein.IDs, Majority.protein.IDs, 
+                Fasta.headers,contains("Ratio."), -contains("normalized"), -contains("type"), 
+                -contains("variability"), -contains("count"), Only.identified.by.site, Reverse, Potential.contaminant,
+                matches("^Peptides.")) %>%
+  filter(Potential.contaminant != "+" & Reverse != "+" & Only.identified.by.site != "+") %>%
+  rowwise() %>% 
+  filter(sum(Peptides.ZK1 == 0,Peptides.ZK2 == 0,Peptides.ZK3 == 0) <= 1) %>% 
+  filter(mean(Peptides.ZK1,Peptides.ZK2,Peptides.ZK3) > 1) %>% 
+  dplyr::select(-Only.identified.by.site, -Reverse, -Potential.contaminant, -matches("^Peptides.")) %>% 
+  ungroup()
+#Organize ratios (invert the necessary ones in accordance with label swapping)
+#In experiment 1: pmap=WT, WT=L, pEspF=M
+#In experiment 2: pmap=L, pEspF=H,WT=M
+#In experiment 3: pmap=M, WT=H, pEspF=L
+asp_start <- evid_all %>% 
+  mutate(`map/UI 1` = Ratio.H.L.ZK1,
+         `map/UI 2` = 1/Ratio.M.L.ZK2,
+         `map/UI 3` = 1/Ratio.H.M.ZK3,
+         `EspF/UI 1` = Ratio.M.L.ZK1,
+         `EspF/UI 2` = Ratio.H.M.ZK2,
+         `EspF/UI 3` = 1/Ratio.H.L.ZK3,
+         `map/EspF 1` = Ratio.H.M.ZK1,
+         `map/EspF 2` = 1/Ratio.H.L.ZK2,
+         `map/EspF 3` = Ratio.M.L.ZK3, .keep = "unused") %>% 
+  dplyr::select(contains("/"), everything(), -contains("Ratio"))
+#Convert fasta headers into gene names
+asp_gene <- asp_start %>% 
+  separate(Fasta.headers, into = letters [1:9], sep = "\\|") %>% 
+  mutate(GN = str_c(str_replace_na(str_extract(c,"GN=([:graph:])+"), replacement = ""),
+                    str_replace_na(str_extract(e,"GN=([:graph:])+"), replacement = ""),
+                    str_replace_na(str_extract(g,"GN=([:graph:])+"), replacement = ""),
+                    sep = ";")) %>% 
+  separate(GN, into = str_c("Gene",seq_len(3)), sep = ";")  %>% 
+  mutate(across(contains("Gene"),~ str_remove(str_replace_na(.,replacement=""), "GN="))) %>%   
+  rowwise() %>%  
+  mutate(GN_unq = str_c(unique(c(Gene1,Gene2,Gene3)), collapse = ";")) %>% 
+  mutate(GN_unq = str_remove(GN_unq, "(;+$)|(^;+)")) %>% 
+  dplyr::select(-matches("^[a-i]$"), -contains("Gene")) %>% 
+  dplyr::rename(`Gene names` = GN_unq) %>%  
+  mutate(across(contains("/"), ~if_else(is.nan(.),NA,.))) %>% 
+  ungroup()
+```
+
+
+```{r echo=TRUE, include=TRUE}
+#Needs normalization
+boxplot(asp_start [,1:9]) 
+genes <- list()
+m <- 1
+for (i in str_c("map/UI ",seq_len(3))) {
+  genes [[m]] <- asp_gene$`Gene names` [!is.na(asp_start [,i])]
+  m <- m+1
+}
+names(genes) <- str_c("map/UI ",seq_len(3))
+ggvenn(genes)
+```
+Normalize with median values
+
+```{r med-norm}
+#Median normalize the ratios - take a median of each column, divide each ratio by the median, take log2 of the whole thing
+asp_norm <- asp_gene %>% 
+  dplyr::mutate(across(contains("/"), ~ log2(.x/median(.x, na.rm = T))))
+boxplot(asp_norm [,1:9]) 
+```
+
+
+Now we can plot correlations of experiments against each other
+```{r cor}
+cor_z_1_2 <- cor.test(asp_norm$`map/UI 1`,asp_norm$`map/UI 2`, method = "pearson", conf.level = 0.95)
+cor_z_1_3 <- cor.test(asp_norm$`map/UI 1`,asp_norm$`map/UI 3`, method = "pearson", conf.level = 0.95)
+cor_z_2_3 <- cor.test(asp_norm$`map/UI 2`,asp_norm$`map/UI 3`, method = "pearson", conf.level = 0.95)
+
+conds <- colnames(asp_norm)
+#pdf("quality assessment plots.pdf")
+boxplot(asp_gene [,1:9], main = "Ratios before normalization") 
+boxplot(asp_norm [,1:9], main = "Ratios after median normalization")  
+ggvenn(genes) + labs(title = "Detected peptides (not NaN)")
+ggplot(asp_norm,aes(x=`map/UI 1`, y= `map/UI 2`)) + geom_point() +geom_smooth(method = "lm") + 
+  labs(subtitle = str_c("R ", round(cor_z_1_2$estimate, 2), 
+                        " ,p-value ", format(cor_z_1_2$p.value,scientific = T,digits = 2), sep = ""))
+ggplot(asp_norm,aes(x=`map/UI 1`, y= `map/UI 3`)) + geom_point() +geom_smooth(method = "lm") + 
+  labs(subtitle = str_c("R ", round(cor_z_1_3$estimate, 2), 
+                        " ,p-value ", format(cor_z_1_3$p.value,scientific = T,digits = 2), sep = ""))
+ggplot(asp_norm,aes(x=`map/UI 2`, y= `map/UI 3`)) + geom_point() +geom_smooth(method = "lm") + 
+  labs(subtitle = str_c("R ", round(cor_z_2_3$estimate, 2), 
+                        " ,p-value ", format(cor_z_2_3$p.value,scientific = T,digits = 2), sep = ""))
+
+ggscatterstats(
+  data  = asp_norm,
+  x     = `map/UI 1`,
+  y     = `map/UI 2`)
+ggscatterstats(
+  data  = asp_norm,
+  x     = `map/UI 1`,
+  y     = `map/UI 3`)
+ggscatterstats(
+  data  = asp_norm,
+  x     = `map/UI 2`,
+  y     = `map/UI 3`)
+ggscatterstats(
+  data  = asp_norm,
+  x     = `map/EspF 1`,
+  y     = `map/EspF 2`)
+ggscatterstats(
+  data  = asp_norm,
+  x     = `map/EspF 1`,
+  y     = `map/EspF 3`)
+ggscatterstats(
+  data  = asp_norm,
+  x     = `map/EspF 2`,
+  y     = `map/EspF 3`)
+#dev.off()
+```
+Write output tables
+```{r}
+asp_final <- asp_norm %>%
+  rowwise() %>% 
+  mutate(`map/UI mean` = mean(c_across(contains("map/UI")), na.rm=T),
+         `EspF/UI mean` = mean(c_across(contains("EspF/UI")), na.rm=T),
+         `map/EspF mean` = mean(c_across(contains("map/EspF")), na.rm=T))
+#write_csv(asp_final, "zk_map_espF_median_normalized.csv" )
+```
+Determine cut-offs using this paper - https://www.nature.com/articles/s41596-020-0399-0#Sec43
+and cellular component.
+
+Use Human Atlas Project for protein localization data
+
+```{r fp_list}
+#Read in subcellular localization and remove uncertain localizations
+atlas_loc <- read_delim(here::here("subcellular_location_from_Human_Atlas.tsv"), delim = "\t") %>% 
+  filter(Reliability != "Uncertain", !duplicated(`Gene name`)) 
+#Add localizations to the major detected peptides
+asp_annot <- asp_norm %>% 
+  separate(`Gene names`, into = c("Leader major","Second major"), extra = "drop", sep = ";") %>% 
+  left_join(dplyr::select(atlas_loc, `Gene name`, `GO id`), by = c("Leader major" = "Gene name")) %>%  
+  left_join(dplyr::select(atlas_loc, `Gene name`, `GO id 2` = `GO id`), by = c("Second major" = "Gene name")) %>% 
+  mutate(`GO id` = case_when(
+    !is.na(`GO id`) & !is.na(`GO id 2`) & `GO id 2` !=  `GO id` ~ str_c(`GO id`, `GO id 2`, sep = ";"),
+    is.na(`GO id`) & !is.na(`GO id 2`) ~ `GO id 2`,
+    TRUE ~ `GO id`
+  )) %>% 
+  dplyr::select(-`GO id 2`) 
+#Create a list of categories for False Positive hits
+unq <- asp_annot$`GO id` %>% unique %>% as_tibble()
+fp_cats <- unq %>%   
+  filter(!str_detect(value, "Mitocho")) %>%
+  filter(!str_detect(value, "Cyto")) %>% 
+  filter(!str_detect(value, "tubul")) %>% 
+  pull(value)
+#Identify true positive hits, but will not be using these numbers, as they are not actually that enriched
+tp_cats <- unq %>% 
+  filter(str_detect(value, "Mitoch")) %>% 
+  filter(!str_detect(value, "Nuc")) %>%
+  filter(!str_detect(value, "Cyto")) %>%
+  filter(!str_detect(value, "tubul")) %>% 
+  pull(value)
+  
+#Assign genes as false positives and true positives for EspZ
+asp_annot <- asp_annot %>% 
+  mutate(Z_FP = case_when(
+    `GO id` %in% fp_cats ~ "+",
+    TRUE ~ "-"
+  ), Z_TP = case_when(
+    `GO id` %in% tp_cats ~ "+",
+    TRUE ~ "-"
+  ))
+```
+
+
+```{r fp_list-1, warning=FALSE}
+#Identify cut-off for appropriate FDR for each replicate - false discovery rate
+#Let's aim FDR (called false positive rate) of 0.01
+#Let's do step of 0.01
+experiments_z <- asp_annot %>% 
+  dplyr::select(contains("map")) %>% 
+  colnames()
+fdr_cuts <- vector(mode = "numeric", length = length(experiments_z))
+fprs <- vector(mode = "numeric", length = length(experiments_z))
+#Select FDR cutoff ratio of 0.5 arbitrarily
+
+dummy_table <- as.data.frame(matrix(ncol = 9, nrow = nrow(asp_annot)))
+colnames(dummy_table) <- c(str_c("pass_ui_cut", seq_len(3), sep = "_"),
+                           str_c("pass_EspF_cut", seq_len(3), sep = "_"),
+                           str_c("pass_both_cuts", seq_len(3), sep = "_"))
+#Replace leading gene names with meaningful ones (so remove HEL-S and hCG)
+asp_annot <- asp_annot %>% 
+  mutate(`Leader major orig` = `Leader major`,
+         `Leader major` = case_when(
+           str_detect(`Leader major`, "(HEL-)|(hCG)") & !is.na(`Second major`) ~ `Second major`,
+           TRUE ~ `Leader major`
+         )) %>% #Add missing gene names
+  mutate(`Leader major` = case_when(
+    str_detect(Majority.protein.IDs, "B4DMF5") ~ "GLUD2",
+    str_detect(Majority.protein.IDs, "RPN1") ~ "RPN1",
+    str_detect(Majority.protein.IDs, "HS90B") ~ "HSP90AB1",
+    str_detect(Majority.protein.IDs, "Q53FC7") ~ "HSPA6",
+    str_detect(Majority.protein.IDs, "B4DNG2") ~ "DDX5",
+    str_detect(Majority.protein.IDs, "B4DL14") ~ "ATP5F1C",
+    str_detect(Majority.protein.IDs, "B4DVQ0") ~ "ACTB",
+    str_detect(Majority.protein.IDs, "B3KX72") ~ "HNRNPU",
+    str_detect(Majority.protein.IDs, "B3KM73") ~ "TBRG4",
+    str_detect(Majority.protein.IDs, "B4DI01") ~ "CDK5RAP1",
+    str_detect(Majority.protein.IDs, "B4DE59") ~ "JUP",
+    TRUE ~ `Leader major`
+  ))
+asp_volcano <- asp_annot %>% 
+  dplyr::select(contains("/"), `Leader major`, Z_FP,Z_TP) %>% 
+  bind_cols(dummy_table)
+#If could not identify a meaningful cut-off, instead set it to 0.5 arbitrarily
+for (i in 1:3) {
+    fdr_cuts [i] = 0.5
+    fdr_cuts [i+3] = 0.45
+}
+for (i in 1:3) {
+  asp_volcano [,colnames(dummy_table) [i]] <- ifelse(asp_volcano [,experiments_z [i]] > fdr_cuts [i], "yes", "no")
+  asp_volcano [,colnames(dummy_table) [i+3]] <- ifelse(asp_volcano [,experiments_z [i+3]] > fdr_cuts [i+3], "yes", "no")
+  asp_volcano [,colnames(dummy_table) [i+6]] <- ifelse(asp_volcano [,colnames(dummy_table) [i]] == "yes" & 
+                                                          asp_volcano [,colnames(dummy_table) [i+3]] == "yes", "yes", "no")
+}
+asp_volcano <- asp_volcano %>% 
+  mutate(across(contains("pass"),~str_replace_na(., replacement = "no")))
+```
+
+
+```{r fp_list-plotting, eval=FALSE}
+#Plot histograms for ratio spread - of all hits, of true positives and false positives
+fills <- c("All hits" = "darkgray", "False positive (nucleus)" = "firebrick", "True positive (mitochondria)" = "seagreen")
+#pdf("Histograms for ratio cut-off selection.pdf")
+asp_annot$Reverse <- ""
+for (i in 1:length(experiments_z)) {
+  p <- ggplot(asp_annot, aes_(as.name(experiments_z [i]))) + 
+    geom_histogram(aes(fill = Reverse, color = Reverse),alpha = 0.5, lwd = 1) +
+    geom_histogram(data = filter(asp_annot, Z_FP == "+"), aes_(as.name(experiments_z [i])), 
+                   fill = "red", alpha = 0.5, color = "firebrick", lwd=1) +
+    geom_histogram(data = filter(asp_annot, Z_TP == "+"), aes_(as.name(experiments_z [i])), 
+                   fill = "seagreen", alpha = 0.5, color = "seagreen", lwd=1) + 
+    scale_fill_manual(values = fills, name = "Legend") +
+    scale_color_manual(values = fills, name = "Legend") +
+    theme(legend.position = "bottom") 
+  print(p)
+}
+
+for (i in 1:length(experiments_z)) {
+  p_fp <- ggplot(data = filter(asp_annot, Z_FP == "+"), aes_(as.name(experiments_z [i]))) + geom_histogram(binwidth = 0.15)
+  p_fp <- ggplot_build(p_fp)
+  p <- ggplot(asp_annot, aes_(as.name(experiments_z [i]))) + 
+    geom_histogram(aes(fill = Reverse, color = Reverse),alpha = 0.5, lwd = 1, binwidth = 0.15) +
+    geom_histogram(data = as.data.frame(p_fp$data), aes(x=x,y=-y),stat = "identity",
+                   fill = "red", alpha = 0.5, color = "firebrick", lwd=1) + 
+    geom_vline(xintercept = fdr_cuts [i], lwd = 1.25, color = "dodgerblue4", lty = "longdash") +
+    scale_fill_manual(values = fills [1:2], name = "Legend") +
+    scale_color_manual(values = fills [1:2], name = "Legend") +
+    labs(y = "Count", subtitle = str_c("Cut-off chosen to have False Positive Rate of less than 1%\n",
+                                       "Selected cut-off ", format(fdr_cuts [i], digits = 2), "\n",
+                                       "False positive rate at this cut-off ", round(fprs [i]*100,2),"%"),
+         title = "If FRP=0%, could not calculate it, choose cut-off of 0.5 instead") +
+    theme(legend.position = "bottom") 
+  print(p)
+}
+
+for (i in 1:3) {
+  p <- ggplot(asp_volcano, aes_(x = as.name(experiments_z [i]), y= as.name(experiments_z [i+3]), 
+                           color = as.name(colnames(dummy_table) [i+6]))) +
+    geom_point(size = 3) +
+    geom_vline(xintercept = fdr_cuts [i], lwd = 1.25, color = "dodgerblue4", lty = "longdash") +
+    geom_hline(yintercept = fdr_cuts [i+3], lwd = 1.25, color = "dodgerblue4", lty = "longdash") +
+    scale_color_manual(name = "Pass cut-off compared \n to both EspF and UI", 
+                       values = c("yes" = "firebrick", "no" = "darkgray")) +
+    labs(title = "Ratios in the same experiment against either of the controls") +
+    theme(legend.position = "bottom", legend.box = "vertical")
+  print(p)
+}
+#dev.off()
+```
+
+```{r enrichment, eval=FALSE}
+#Select true hits as the ones that pass cut-off in 2 out of 3 experiments, and apply GO enrichment to them
+asp_generous_hits <- asp_volcano %>% 
+  rowwise() %>% 
+  mutate(true_hits = case_when(
+    #sum(str_detect(c(pass_ui_cut_1,pass_ui_cut_2,pass_ui_cut_3), "yes")) >=2 ~ "yes",
+    sum(str_detect(c(pass_both_cuts_1,pass_both_cuts_2,pass_both_cuts_3), "yes")) >=2 ~ "yes",
+    TRUE ~ "no"
+  )) %>% 
+  filter(true_hits == "yes", Z_FP != "+")
+#write_csv(asp_volcano, here::here("map hits for thesis.csv"))
+asp_hits <- asp_volcano %>% 
+  rowwise() %>% 
+  mutate(true_hits = case_when(
+    #sum(str_detect(c(pass_ui_cut_1,pass_ui_cut_2,pass_ui_cut_3), "yes")) >=2 ~ "yes",
+    sum(str_detect(c(pass_both_cuts_1,pass_both_cuts_2,pass_both_cuts_3), "yes")) >=2 ~ "yes",
+    TRUE ~ "no"
+  )) %>% 
+  filter(true_hits == "yes", Z_FP != "+") %>% 
+  mutate(leader_orig = `Leader major`) %>% 
+  mutate(`Leader major` = str_replace(`Leader major`, "HEL-S-124m", "HSPA9"))
+#write_csv(asp_hits, here::here("map hits for thesis.csv"))
+#Import the Hallmark set of genes and themes
+h <- read.gmt(here::here("h.all.v7.5.1.symbols.gmt"))
+cp <- read.gmt(here::here("c2.cp.v7.5.1.symbols.gmt")) 
+
+
+ego_cc <- enrichGO(gene         = asp_hits$`Leader major`,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'SYMBOL',
+                ont           = "CC",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+ego_bp <- enrichGO(gene         = asp_hits$`Leader major`,
+                OrgDb         = org.Hs.eg.db,
+                keyType       = 'SYMBOL',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+ego_cc2 <- enrichplot::pairwise_termsim(ego_cc)
+ego_cc_simple <- clusterProfiler::simplify(ego_cc2, cutoff=0.6, by="p.adjust", select_fun=min)
+enrich_h <- enricher(asp_hits$`Leader major`,
+                     TERM2GENE = h,
+                     pAdjustMethod = "BH",
+                     pvalueCutoff = 0.05,
+                     qvalueCutoff = 0.05)
+enrich_cp <- enricher(asp_hits$`Leader major`,
+                     TERM2GENE = cp,
+                     pAdjustMethod = "BH",
+                     pvalueCutoff = 0.05,
+                     qvalueCutoff = 0.05)
+asp_annot_hits <- asp_final %>% 
+  separate(`Gene names`, into = c("Leader major","Second major"), extra = "drop", sep = ";") %>% 
+  dplyr::select(`Leader major`, `map/UI mean`)
+asp_hits <- asp_hits %>% 
+  left_join(asp_annot_hits, by = c("leader_orig" = "Leader major"))
+folds <- setNames(asp_hits$`map/UI mean`,asp_hits$`Leader major`)
+#Save all the important tables
+enrichment_dfs <- list("GOCC" = ego_cc, "GOCC_simple" = ego_cc_simple, "GOBP" = ego_bp, "C2" = enrich_cp, "HALLMARK" = enrich_h) %>% 
+  map(as.data.frame)
+#enrichment_dfs %>% 
+ # iwalk(~write_csv(.x, file = here::here(str_c("enrichment final/enrichment tables/",.y,".csv"))))
+```
+
+
+```{r enrichment-plotting-thesis, eval=FALSE, fig.width=6, fig.height=4}
+#prepare colors
+cc_simple_df <- ego_cc_simple %>% 
+  as.data.frame() %>% 
+  mutate(GeneRatio = DOSE::parse_ratio(GeneRatio)) %>% 
+  filter(Count > 1) %>% 
+  filter(Description != "outer membrane") %>% 
+  mutate(Description = str_wrap(str_to_sentence(Description), width = 20))
+
+ggplot(cc_simple_df, aes(x = GeneRatio, y = fct_reorder(Description,GeneRatio), 
+                         color = p.adjust, size = Count)) +
+  geom_point() + 
+  scale_color_gradient(high = cont_pal[2], low = cont_pal[7],name = "Adjusted p-value") + 
+  scale_size(range = c(5,10), breaks = c(3,5,9)) +
+  labs(y = element_blank()) +
+  coord_cartesian(clip = "off", 
+                  xlim = c(min(cc_simple_df$GeneRatio)-0.1, max(cc_simple_df$GeneRatio)+0.05)) + 
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(color = "black"),
+        axis.text.y = element_text(color = "black"))
+#Print this plot
+#ggsave(here::here("enrichment final/GO_CC dotplot.svg"), width = 6, height = 4)
+#ggsave(here::here("enrichment final/GO_CC dotplot.png"), width = 6, height = 4, dpi = 2160)
+```
+
+
+```{r enrichment-plotting-thesis-heatplot, eval=FALSE, fig.width=6, fig.height=3}
+#Make a heatplot for hallmark enrichment results
+enrich_df <- enrich_h %>% 
+  as.data.frame() %>% 
+  separate_rows(geneID, sep = "/") %>% 
+  mutate(leader_orig = if_else(geneID == "HSPA9", "HEL-S-124m", geneID)) %>% 
+  left_join(asp_annot_hits, by = c("leader_orig" = "Leader major")) %>% 
+  dplyr::rename(fold = "map/UI mean") %>% 
+  mutate(Description = "Oxidative\nPhosphorylation")
+ggplot(enrich_df, aes(x = fct_reorder(geneID,dplyr::desc(fold)), y = Description, fill = fold)) +
+  geom_tile() +
+  scale_fill_gradient(high = cont_pal[7], low = cont_pal[2],name = "pmap/WT\nRatio") +
+  labs(x = element_blank(), y = element_blank()) +
+  coord_cartesian(expand = F) +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(color = "black", angle = 45, hjust = 0.8),
+        axis.text.y = element_text(color = "black", hjust = 1))
+#Print this plot
+#ggsave(here::here("enrichment final/Hallmark heatplot.svg"), width = 6, height = 3)
+#ggsave(here::here("enrichment final/Hallmark heatplot.png"), width = 6, height = 3, dpi = 2160)
+```
+
+
+Plot the volcano plot of mean values of ratios with some of the important hits labelled
+
+```{r final-fig-plots, fig.width=6, fig.height=4}
+asp_pubs <- asp_final %>% 
+  left_join(asp_hits, by = c("map/UI 1","map/UI 2", "map/UI 3"), suffix = c("",".y")) %>% 
+  dplyr::select(-contains(".y")) %>% 
+  left_join(filter(h,str_detect(term,"(APOP)|(OXID)")), by = c("Leader major" = "gene")) %>% 
+  mutate(true_hits = case_when(
+    is.na(true_hits) ~ "No",
+    TRUE ~ "Yes"
+  ))  %>%
+  distinct(`Leader major`, `map/UI 1`,`map/UI 2`, `map/UI 3`, .keep_all = T) %>% 
+  mutate(named = case_when(
+    `Leader major` %in% c("VDAC2","LRPPRC","ACAT1") ~ `Leader major`,
+    TRUE ~ ""
+  ))
+ 
+pass_color <- diverg_pal [7]
+
+
+ggplot(asp_pubs, aes(x = `map/UI mean`, y=`map/EspF mean`,
+                     color = true_hits, fill = true_hits)) +
+  geom_point(size = 3, shape = 21, alpha = 0.55) +
+  geom_vline(xintercept = mean(fdr_cuts [1:3]), lwd = 1.25, color = "dodgerblue4", lty = "longdash") +
+  geom_hline(yintercept = mean(fdr_cuts [4:6]), lwd = 1.25, color = "dodgerblue4", lty = "longdash") +
+  scale_color_manual(name = "Pass cut-off against \nboth pEspF and WT Conditions:", 
+                     values = c("Yes" = "firebrick3", "No" = "darkgray"),
+                     aesthetics = c("fill","color")) +
+  geom_label_repel(aes(label = named), color = "black", 
+                   max.overlaps = Inf, fill = "white", min.segment.length = 0, force = 7) +
+  labs(y = "pmap/pEspF\nratio", x = "pmap/WT ratio") +
+  theme_bw(base_size = 16) +
+  theme(legend.position = "bottom", legend.box = "vertical") + 
+  coord_cartesian(xlim = c(-2.5,2.6),ylim = c(-2,2))
+#ggsave(here::here("enrichment final/Mean volcano plot for map.png"), width = 6, height = 4, dpi = 2160)
+#ggsave(here::here("enrichment final/Mean volcano plot for map.svg"), width = 6, height = 4)
+
+#Print the scale for string network
+ggplot(asp_hits, aes(x = `Leader major`, y = 1, fill = `map/UI mean`)) +
+  geom_tile() +
+  scale_fill_gradient(high = cont_pal[6], low = cont_pal[2],name = "pmap/WT\nRatio") +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(color = "black", angle = 45, hjust = 0.8),
+        axis.text.y = element_text(color = "black", hjust = 1))
+#ggsave(here::here("enrichment final/Plot of all hits with a color scale.png"), width = 6, height = 4, dpi = 2160)
+#ggsave(here::here("enrichment final/Plot of all hits with a color scale.svg"), width = 6, height = 4)
+```
+
+Finish with nice string analysis
+```{r string}
+asp_hits$`Leader major` %>% writeClipboard()
+#write_tsv(asp_hits, file = here::here("string_network_analysis/network annotation.tsv"))
+```
+
+
+
+
+
