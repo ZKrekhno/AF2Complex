@@ -1,0 +1,134 @@
+---
+title: "Put all map modelling results together"
+output: html_notebook
+---
+
+```{r lib}
+library(tidyverse)
+library(rcartocolor)
+library(ggprism)
+library(patchwork)
+```
+set up helpers
+```{r helpers}
+my_colors <- carto_pal(name = "Safe")
+my_color <- my_colors [7]
+theme_set(theme_prism(base_size = 6, axis_text_angle = 45) + theme(legend.title = element_text()))
+```
+
+
+Import json files
+```{r}
+#Get a list of all model rankings
+model_rankings <- list.files(path = here::here("af2complex_out/"), pattern = "ranking_all", recursive = T) %>%   
+  as_tibble() %>% 
+  separate(value, into = c("supp","complex","file"), remove = F, sep = "/") %>% 
+  mutate(complex1 = if_else(is.na(file), supp, complex),
+         file1 = if_else(is.na(file), complex, file)) %>% 
+  mutate(complex = complex1,
+         file = file1) %>% 
+  mutate(complex_unq = complex) %>% 
+  filter(str_detect(complex, "map"))
+#Read in the json files
+obj_list <- set_names(model_rankings$value, model_rankings$complex_unq) %>% 
+  map(~as.data.frame(read_lines(file = here::here(str_c("af2complex_out/",.x))))) %>% 
+  map(rename, a=1)
+#Identify interace score classes
+score_index_list <- obj_list %>% 
+  map(~str_which(pull(.x,var = "a"), "interface score"))
+##Find the closing bracket and get the index of that bracket
+for (complex in seq_along(score_index_list)) {
+  dummy_df <- obj_list [[complex]]
+  score_index <- score_index_list [[complex]]
+  for (i in score_index:nrow(dummy_df)) {
+    if (str_detect(dummy_df$a [i], "\\},")) {
+      score_index_list [[complex]] [2] <- i
+      break
+    }
+  }
+}
+#Get the model scores
+model_score <- obj_list %>% 
+  map2(score_index_list, ~slice(.x,.y[1]:.y[2])) %>% 
+  map(~filter(.x,str_detect(a,"recycled", negate = T))) %>% 
+  map(~filter(.x,str_detect(a,"model"))) %>% 
+  imap(~mutate(.x,a = str_remove(a, ","), complex = .y)) %>% 
+  map(~separate(.x,a, into = c("model","score"), sep = ":")) %>% 
+  reduce(bind_rows) %>% 
+  mutate(score = as.numeric(score)) %>% 
+  mutate(complex = fct_reorder(complex, score, .desc = T),
+         model_simple = str_extract(model, "([:digit:]_multimer)|([:digit:]_ptm)"), 
+         complex_no_map = str_remove(complex, "map_"),
+         complex_no_map = fct_reorder(complex_no_map, score, .desc = T)
+         )
+#Edit the model score to remove irrelevant models
+model_score <- model_score %>% 
+  filter(str_detect(complex_no_map, "cesT$", negate = T)) %>% 
+  mutate(complex_no_map = str_remove(complex_no_map,"_super")) %>% 
+  filter(str_detect(complex_no_map, "_", negate = T))
+```
+
+
+```{r plot_model, fig.width=8, fig.height=8}
+p1 <- ggplot(model_score, aes(x=fct_reorder(complex_no_map,score, .desc = T), y = score)) +
+  geom_rect(aes(ymax = 0.4, ymin = 0, xmin = -Inf, xmax = Inf), fill = "grey90") +
+  geom_hline(aes(yintercept = 0.4), linewidth = 2, linetype = 2, color = "grey70") +
+  annotate("text", x = "ATP5MD", y = 0.38, label = "Significance\nCut-off", color = "grey40", fontface = "bold") +
+  stat_summary(geom = "crossbar", fun = "mean", color = my_color, linewidth = 1.2, width = 0.7) +
+  geom_jitter(shape = 21, aes(fill = model_simple), alpha = 0.7, size= 3, width = 0.1) + 
+  scale_fill_carto_d(palette = "Safe") +
+  labs(fill = "AlphaFold Model", y = "Interface Score", x = "Complex with map") + 
+  coord_flip()
+model_score_highest <- model_score %>% 
+  group_by(complex) %>% 
+  slice_max(score, n=1, with_ties = F) 
+p2 <- ggplot(model_score_highest, aes(x=fct_reorder(complex_no_map, score, .desc = T), y = score)) +
+  geom_hline(aes(yintercept = 0.4), linewidth = 2, linetype = 2, color = "grey70") +
+  #annotate("text", x = "MRPL58", y = 0.41, label = "Significance\nCut-off", color = "grey40", fontface = "bold") +
+  geom_col(fill = my_color, color = my_color) +
+  labs(fill = "AlphaFold Model", y = "Interface Score", x = "Complex with map", caption = "Highest score")+ 
+  coord_flip()
+p1+p2
+#ggsave(here::here("AF2Complex results with map all analysis combined.svg"), width = 9, height = 10)
+```
+Annotate the significant and close hits and replot
+```{r, fig.width=8, fig.height=10}
+highest_is_annot <- model_score_highest %>% 
+  filter(score > 0.35, complex_no_map != "CISD3") %>% 
+  mutate(annot = case_when(
+    complex_no_map == "cesT" | complex_no_map == "NHERF2"  ~ "Known\nInteractor",
+    complex_no_map %in% c("BCL2L14","BAK1") ~ "Bcl2-like",
+    complex_no_map %in% c("IMMP1L") ~ "Mito Import",
+    complex_no_map %in% c("COQ9","COQ4") ~ "Coenzyme Q Biosynthesis",
+    complex_no_map %in% c("HSCB","CISD3","SDHB") ~ "Iron-Sulfur Cluster",
+    TRUE ~ "Unclear"
+  ), second_annot = case_when(
+    annot %in% c("Iron-Sulfur Cluster", "Coenzyme Q Biosynthesis") ~ "ETC",
+    complex_no_map %in% c("LYRM2","CHCHD10") ~ "ETC",
+    TRUE ~ annot
+  )) %>% 
+  ungroup() %>% 
+  mutate(annot = fct_relevel(annot, "Known\nInteractor", "Mito Import"),
+         annot = fct_relevel(annot, "Bcl2-like","Unclear", after = Inf),
+         second_annot = fct_relevel(second_annot,"Known\nInteractor", "Mito Import"),
+         second_annot = fct_relevel(second_annot, "Bcl2-like","Unclear", after = Inf))
+p3 <- ggplot(highest_is_annot, aes(x=fct_reorder(complex_no_map, score, .desc = T), y = score)) +
+  geom_hline(aes(yintercept = 0.4), linewidth = 2, linetype = 2, color = "grey70") +
+  geom_col(fill = my_color, color = my_color, width = 0.9) +
+  labs(fill = "AlphaFold Model", y = "Interface Score", x = element_blank())+ 
+  theme_prism(base_size = 14, axis_text_angle = 45) +
+  facet_grid(~annot, scales = "free_x", labeller = label_wrap_gen(width = 10), space = "free_x")
+p3
+p4 <- ggplot(highest_is_annot, aes(x=fct_reorder(complex_no_map, score, .desc = T), y = score)) +
+  geom_hline(aes(yintercept = 0.4), linewidth = 2, linetype = 2, color = "grey70") +
+  geom_col(fill = my_color, color = my_color, width = 0.9) +
+  labs(fill = "AlphaFold Model", y = "Interface Score", x = element_blank())+ 
+  theme_prism(base_size = 14, axis_text_angle = 45) +
+  facet_grid(~second_annot, scales = "free_x", labeller = label_wrap_gen(width = 10), space = "free_x")
+p4/p3
+#ggsave(here::here("Annotated map direct interactors.svg"), p4/p3, width = 8, height = 10)
+```
+
+
+
+

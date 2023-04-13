@@ -1,0 +1,50 @@
+---
+title: "Preparing map target lists"
+output: html_notebook
+---
+
+```{r lib}
+library(tidyverse)
+library(rcartocolor)
+library(ggprism)
+```
+
+Prep combinations of LRPPRC, DLAT, VDAC2, EEF1A, ACAT1
+```{r import}
+hits <- read_tsv(here::here("prep_map_human_hits/map_hitsvsname.tsv")) %>% 
+  filter(str_detect(`Entry Name`, "SOAT1", negate = T))
+
+
+hits_int <- hits %>% 
+  filter(From %in% c("VDAC2","LRPPRC","EEF1A1","DLAT","ACAT1")) %>% 
+  select(From, Length)
+target_list <- vector(mode = "list", length = nrow(hits_int))
+for (i in seq_along(hits_int$From)) {
+  dummy_df <- hits_int %>% 
+    filter(From == hits_int$From [i])
+  target_list [[i]] <- hits_int %>% 
+    mutate(To = dummy_df$From, Length_To = dummy_df$Length) %>% 
+    filter(From != To)
+}
+targets <- reduce(target_list, bind_rows) %>% 
+  mutate(`Size(AAs)` = Length + Length_To) %>% 
+  filter(!duplicated(`Size(AAs)`)) %>% 
+  mutate(`##Target(components)` = str_c(From, To, sep = "/"),
+         `Name(for output)` = str_c(From, To, sep = "_")) %>% 
+  arrange(desc(`Size(AAs)`))
+#Break the big table into several more manageable tables for submission
+chunklength <- 5
+n_indices <-ceiling(nrow(targets)/chunklength)
+target_list <- vector(mode = "list", length = n_indices) 
+vector <- seq_along(targets$From)
+#Include 5 targets per object
+indices <- split(vector, ceiling(seq_along(vector) / chunklength))
+#Create the targeting tables
+targets <- target_list %>% 
+  map2(indices, ~slice(targets, .y)) %>% 
+  map(select, contains("Target"), contains("Size"), contains("output"))
+#Write the tables
+#iwalk(targets, ~write_delim(.x, file = here::here(str_c("prep_map_human_hits/map_target_within_each",.y,".lst")), delim = "\t"))
+
+```
+

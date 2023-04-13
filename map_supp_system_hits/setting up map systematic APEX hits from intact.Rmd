@@ -1,0 +1,81 @@
+---
+title: "Setting up map systematic supplemental hits"
+output: html_notebook
+---
+
+```{r lib}
+library(clipr)
+library(tidyverse)
+library(readxl)
+```
+
+Import mitocarta objet and the interacting partners for ACAT1 = P24752, LRPPRC = P42704, VDAc2 = P45880
+```{r import}
+#Import mitocarta data
+cart <- read_excel(here::here("map_supp_hits/Human.MitoCarta3.0.xls"), sheet = 2)
+#Import intact files
+intact_files <- read_csv(here::here("map_supp_system_hits/APEX_hits_Intact_extract.csv"))
+
+#Add mitocarta information to the dfs object
+annot_dfs <- cart %>% 
+  select(Symbol, Description, UniProt, ProteinLength) %>% 
+  inner_join(intact_files, by = c("UniProt" = "B")) %>% 
+  distinct(Symbol, .keep_all = T)
+```
+Next step is to filter the object to small proteins and set up targeting lists
+```{r filter}
+filt_dfs <- annot_dfs %>% 
+  filter(ProteinLength < 350)
+#Filter more - remove ribosomal proteins and HSPD1 hits
+more_filt_dfs <- filt_dfs %>% 
+  filter(A!="P10809",str_detect(Description, "ribosomal", negate = T))
+#Remove those already analyzed from previous runs
+#List all target files and extract symbols from those
+former_targets <- list.files(path = here::here(), pattern = "_target_", recursive = T) %>% 
+  str_subset("map") %>% 
+  str_subset("within", negate = T)
+#Read in and reduce all the targets
+former_targets_dfs <- former_targets %>% 
+  map(~read_tsv(here::here(.)))
+apex_targets <- read_tsv(here::here("prep_map_human_hits/map_hits.lst"))
+former_targets_dfs_filt <- append(former_targets_dfs,list(apex_targets)) %>% 
+  reduce(bind_rows) %>% 
+  mutate(Symbol = str_remove(`Name(for output)`,"map_"))
+#Filter out previously analyzed proteins
+final_filt_dfs <- more_filt_dfs %>% 
+  filter(!(Symbol %in% former_targets_dfs_filt$Symbol)) %>% 
+  filter()
+#Prepare the names and ids for copying into a bash script
+bash_df <- final_filt_dfs %>% 
+  mutate(Symbol_bash = str_c("'",Symbol,"'"),
+         ID_bash = str_c("'",UniProt,"'"))
+write_clip(bash_df$Symbol_bash, breaks = " ")
+write_clip(bash_df$ID_bash, breaks = " ")
+```
+Finally, create targetting lists for the AF2complex
+```{r target}
+hits_with_z <- final_filt_dfs %>% 
+  select(From = Symbol, Length = ProteinLength) %>% 
+  mutate(espz = "map|45-203:1", length_z = 158) %>% 
+  mutate(`##Target(components)` = str_c(espz, From, sep = "/"),
+         `Size(AAs)` = Length + length_z,
+         `Name(for output)` = str_c(str_extract(espz,"[:alpha:]+"), From, sep = "_"))
+#Include 5 targets per object
+chunklength <- 5
+#Break the big table into several more manageable tables for submission
+n_indices <-ceiling(nrow(hits_with_z)/chunklength)
+target_list <- vector(mode = "list", length = n_indices) 
+vector <- seq_along(hits_with_z$From)
+indices <- split(vector, ceiling(seq_along(vector) / chunklength))
+#Create the targeting tables
+targets <- target_list %>% 
+  map2(indices, ~slice(hits_with_z, .y)) %>% 
+  map(select, contains("Target"), contains("Size"), contains("output"))
+#Write the tables
+#iwalk(targets, ~write_delim(.x, file = here::here(str_c("map_supp_system_hits/map_system_target_",.y,".lst")), delim = "\t"))
+```
+
+
+
+
+

@@ -1,0 +1,135 @@
+---
+title: "Extract model interface score"
+output: html_notebook
+---
+
+```{r lib}
+library(tidyverse)
+library(rcartocolor)
+library(ggprism)
+library(patchwork)
+```
+set up helpers
+```{r helpers}
+my_colors <- carto_pal(name = "Safe")
+my_color <- my_colors [7]
+theme_set(theme_prism(base_size = 14, axis_text_angle = 45) + theme(legend.title = element_text()))
+```
+
+
+Import json files
+```{r}
+#Get a list of all model rankings
+model_rankings <- list.files(path = here::here("af2complex_out/"), pattern = "ranking_all", recursive = T) %>% 
+  as_tibble() %>% 
+  separate(value, into = c("complex","file"), remove = F, sep = "/") %>% 
+  mutate(complex_unq = complex) %>% 
+           #if_else(duplicated(complex), 
+                               #str_c(complex, str_extract(file, "01[:digit:]+"), sep = "_"),
+                               #complex)) %>% 
+  filter(str_detect(complex, "map"))
+#Read in the json files
+obj_list <- set_names(model_rankings$value, model_rankings$complex_unq) %>% 
+  map(~as.data.frame(read_lines(file = here::here(str_c("af2complex_out/",.x))))) %>% 
+  map(rename, a=1)
+#Identify interace score classes
+score_index_list <- obj_list %>% 
+  map(~str_which(pull(.x,var = "a"), "interface score"))
+##Find the closing bracket and get the index of that bracket
+for (complex in seq_along(score_index_list)) {
+  dummy_df <- obj_list [[complex]]
+  score_index <- score_index_list [[complex]]
+  for (i in score_index:nrow(dummy_df)) {
+    if (str_detect(dummy_df$a [i], "\\},")) {
+      score_index_list [[complex]] [2] <- i
+      break
+    }
+  }
+}
+#Get the model scores
+model_score <- obj_list %>% 
+  map2(score_index_list, ~slice(.x,.y[1]:.y[2])) %>% 
+  map(~filter(.x,str_detect(a,"recycled", negate = T))) %>% 
+  map(~filter(.x,str_detect(a,"model"))) %>% 
+  imap(~mutate(.x,a = str_remove(a, ","), complex = .y)) %>% 
+  map(~separate(.x,a, into = c("model","score"), sep = ":")) %>% 
+  reduce(bind_rows) %>% 
+  mutate(score = as.numeric(score)) %>% 
+  mutate(complex = fct_reorder(complex, score, .desc = T),
+         model_simple = str_extract(model, "([:digit:]_multimer)|([:digit:]_ptm)"), 
+         complex_no_map = str_remove(complex, "map_"),
+         complex_no_map = fct_reorder(complex_no_map, score, .desc = T)
+         )
+```
+
+
+```{r plot_model, fig.width=9, fig.height=10}
+p1 <- ggplot(model_score, aes(x=complex_no_map, y = score)) +
+  geom_rect(aes(ymax = 0.4, ymin = 0, xmin = -Inf, xmax = Inf), fill = "grey90") +
+  geom_hline(aes(yintercept = 0.4), linewidth = 2, linetype = 2, color = "grey70") +
+  annotate("text", x = "TRAP1", y = 0.41, label = "Significance\nCut-off", color = "grey40", fontface = "bold") +
+  stat_summary(geom = "crossbar", fun = "mean", color = my_color, linewidth = 1.2, width = 0.7) +
+  geom_jitter(shape = 21, aes(fill = model_simple), alpha = 0.7, size= 3, width = 0.1) + 
+  scale_fill_carto_d(palette = "Safe") +
+  labs(fill = "AlphaFold Model", y = "Interface Score", x = "Complex with map")
+model_score_highest <- model_score %>% 
+  group_by(complex) %>% 
+  slice_max(score, n=1, with_ties = F) 
+p2 <- ggplot(model_score_highest, aes(x=fct_reorder(complex_no_map, score, .desc = T), y = score)) +
+  geom_col(fill = my_color, color = my_color) +
+  labs(fill = "AlphaFold Model", y = "Interface Score", x = "Complex with map", caption = "Highest score")
+p1/p2
+#ggsave(here::here("AF2Complex results with map hits.png"), width = 9.5, height = 10, dpi = 1080)
+```
+
+``` {r pitms}
+#Identify interace score classes
+pitms_index_list <- obj_list %>% 
+  map(~str_which(pull(.x,var = "a"), "pitms"))
+##Find the closing bracket and get the index of that bracket
+for (complex in seq_along(score_index_list)) {
+  dummy_df <- obj_list [[complex]]
+  score_index <- pitms_index_list [[complex]]
+  for (i in score_index:nrow(dummy_df)) {
+    if (str_detect(dummy_df$a [i], "\\},")) {
+      pitms_index_list [[complex]] [2] <- i
+      break
+    }
+  }
+}
+#Get the model scores
+model_pitms <- obj_list %>% 
+  map2(pitms_index_list, ~slice(.x,.y[1]:.y[2])) %>% 
+  map(~filter(.x,str_detect(a,"recycled", negate = T))) %>% 
+  map(~filter(.x,str_detect(a,"model"))) %>% 
+  imap(~mutate(.x,a = str_remove(a, ","), complex = .y)) %>% 
+  map(~separate(.x,a, into = c("model","score"), sep = ":")) %>% 
+  reduce(bind_rows) %>% 
+  mutate(score = as.numeric(score)) %>% 
+  mutate(complex = fct_reorder(complex, score, .desc = T),
+         model_simple = str_extract(model, "([:digit:]_multimer)|([:digit:]_ptm)"), 
+         complex_no_map = str_remove(complex, "map_"),
+         complex_no_map = fct_reorder(complex_no_map, score, .desc = T)
+         )
+```
+
+
+```{r plot_model_pitms, fig.width=9, fig.height=10}
+p_pitms1 <- ggplot(model_pitms, aes(x=complex_no_map, y = score)) +
+  #geom_rect(aes(ymax = 0.3, ymin = 0, xmin = -Inf, xmax = Inf), fill = "grey90") +
+  #geom_hline(aes(yintercept = 0.3), linewidth = 2, linetype = 2, color = "grey70") +
+  #annotate("text", x = "LRPPRC", y = 0.31, label = "Significance\nCut-off", color = "grey40", fontface = "bold") +
+  stat_summary(geom = "crossbar", fun = "mean", color = my_color, linewidth = 1.2, width = 0.7) +
+  geom_jitter(shape = 21, aes(fill = model_simple), alpha = 0.7, size= 3, width = 0.1) + 
+  scale_fill_carto_d(palette = "Safe") +
+  labs(fill = "AlphaFold Model", y = "piTM-score", x = "Complex with map")
+model_pitms_highest <- model_pitms %>% 
+  group_by(complex) %>% 
+  slice_max(score, n=1, with_ties = F) 
+p_pitms2 <- ggplot(model_pitms_highest, aes(x=fct_reorder(complex_no_map, score, .desc = T), y = score)) +
+  geom_col(fill = my_color, color = my_color) +
+  labs(fill = "AlphaFold Model", y = "piTM-score", x = "Complex with map", caption = "Highest score")
+p_pitms1/p_pitms2
+#ggsave(here::here("AF2Complex results with map hits piTMs.png"), width = 9.5, height = 10, dpi = 1080)
+```
+

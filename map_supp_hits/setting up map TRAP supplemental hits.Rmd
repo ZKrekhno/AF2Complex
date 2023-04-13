@@ -1,0 +1,75 @@
+---
+title: "Getting TRAP hits "
+output: html_notebook
+---
+
+```{r lib}
+library(clipr)
+library(tidyverse)
+library(readxl)
+```
+
+Import mitocarta objet and the interacting partners for TRAP1 = Q12931
+```{r import}
+#Import mitocarta data
+cart <- read_excel(here::here("map_supp_hits/Human.MitoCarta3.0.xls"), sheet = 2)
+#Import intact files
+intact_files <- list.files(path = here::here(), pattern = "intact.tsv", recursive = T)
+intact_list <- intact_files %>% 
+  map(~read_tsv(here::here(.x)))
+#Organize intact objects for ease of use 
+intact_dfs <- intact_list %>% 
+  reduce(bind_rows) %>% 
+  select(A = `# ID(s) interactor A`,B =  `ID(s) interactor B`,Alias_A = `Alias(es) interactor A`, Alias_B = `Alias(es) interactor B`) %>% 
+  filter(if_all(.cols = c(A,B), .fns = ~str_detect(.x, "uniprotkb"))) %>% 
+  mutate(A = str_remove(A, "uniprotkb:"),
+         B = str_remove(B, "uniprotkb:"))
+#Rearrange the table so that all A are my hits of interest, and all B are other proteins
+dfs <- intact_dfs %>% 
+  filter(A %in% c("Q12931")) %>% 
+  bind_rows(.,rename(filter(intact_dfs, B %in% c("Q12931")),
+                     B = A,
+                     A = B)) %>% 
+  distinct(A,B, .keep_all = T)
+#Add mitocarta information to the dfs object
+annot_dfs <- cart %>% 
+  select(Symbol, Description, UniProt, ProteinLength) %>% 
+  inner_join(dfs, by = c("UniProt" = "B")) %>% 
+  distinct(Symbol, .keep_all = T)
+```
+Next step is to filter the object to small proteins and set up targeting lists
+```{r filter}
+filt_dfs <- annot_dfs %>% 
+  filter(ProteinLength < 350) %>% 
+  #remove proteins already tested from other hits
+  filter(!(Symbol %in% c("VDAC1","HSCB","SOD1","HSD17B10","OPA3","SIRT4")))
+#Prepare the names and ids for copying into a bash script
+bash_df <- filt_dfs %>% 
+  mutate(Symbol_bash = str_c("'",Symbol,"'"),
+         ID_bash = str_c("'",UniProt,"'"))
+write_clip(bash_df$Symbol_bash, breaks = " ")
+write_clip(bash_df$ID_bash, breaks = " ")
+```
+Finally, create targetting lists for the AF2complex
+```{r target}
+hits_with_z <- filt_dfs %>% 
+  select(From = Symbol, Length = ProteinLength) %>% 
+  mutate(espz = "map|45-203:1", length_z = 158) %>% 
+  mutate(`##Target(components)` = str_c(espz, From, sep = "/"),
+         `Size(AAs)` = Length + length_z,
+         `Name(for output)` = str_c(str_extract(espz,"[:alpha:]+"), From, sep = "_"))
+#Include 5 targets per object
+chunklength <- 2
+#Break the big table into several more manageable tables for submission
+n_indices <-ceiling(nrow(hits_with_z)/chunklength)
+target_list <- vector(mode = "list", length = n_indices) 
+vector <- seq_along(hits_with_z$From)
+indices <- split(vector, ceiling(seq_along(vector) / chunklength))
+#Create the targeting tables
+targets <- target_list %>% 
+  map2(indices, ~slice(hits_with_z, .y)) %>% 
+  map(select, contains("Target"), contains("Size"), contains("output"))
+#Write the tables
+#iwalk(targets, ~write_delim(.x, file = here::here(str_c("map_supp_hits/map_supp_TRAP_target_",.y,".lst")), delim = "\t"))
+```
+

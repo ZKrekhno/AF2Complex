@@ -1,0 +1,49 @@
+---
+title: "Setting up map bcl2 hits"
+output: html_notebook
+---
+
+```{r lib}
+library(clipr)
+library(tidyverse)
+library(readxl)
+```
+
+Import mitocarta objet and the interacting partners for ACAT1 = P24752, LRPPRC = P42704, VDAc2 = P45880
+```{r import}
+#Import mitocarta data
+df <- read_tsv(here::here("map_bcl2_hits/uniprot_bcl2_curated_list.tsv"))
+df <- df %>% 
+  filter(`Entry Name` != "BAK_HUMAN")
+#Separate gene names
+df_name <- df %>% 
+  mutate(Symbol = str_extract(`Gene Names`, "[:alnum:]+"))
+```
+
+Finally, create targetting lists for the AF2complex
+```{r target}
+hits_with_z <- df_name %>% 
+  select(From = Symbol, Length) %>% 
+  mutate(espz = "map|45-203:1", length_z = 158) %>% 
+  mutate(`##Target(components)` = str_c(espz, From, sep = "/"),
+         `Size(AAs)` = Length + length_z,
+         `Name(for output)` = str_c(str_extract(espz,"[:alpha:]+"), From, sep = "_"))
+#Include 3 targets per object
+chunklength <- 3
+#Break the big table into several more manageable tables for submission
+n_indices <-ceiling(nrow(hits_with_z)/chunklength)
+target_list <- vector(mode = "list", length = n_indices) 
+vector <- seq_along(hits_with_z$From)
+indices <- split(vector, ceiling(seq_along(vector) / chunklength))
+#Create the targeting tables
+targets <- target_list %>% 
+  map2(indices, ~slice(hits_with_z, .y)) %>% 
+  map(select, contains("Target"), contains("Size"), contains("output"))
+#Write the tables
+#iwalk(targets, ~write_delim(.x, file = here::here(str_c("map_bcl2_hits/map_bcl2_target_",.y,".lst")), delim = "\t"))
+```
+
+
+
+
+
